@@ -65,12 +65,25 @@ function App() {
   }, [selectedIndex, results]);
 
   useEffect(() => {
-    const unlisten = listen<string>("indexing-progress", (event) => {
+    const unlistenProgress = listen<string>("indexing-progress", (event) => {
       setStatus(`Indexing: ${getFileName(event.payload)}`);
       setIsIndexing(true);
     });
+
+    const unlistenModelLoaded = listen("model-loaded", () => {
+      setStatus(""); // Clear loading status
+      setIsIndexing(false);
+    });
+
+    const unlistenModelError = listen<string>("model-load-error", (event) => {
+      setStatus(`Model Error: ${event.payload}`);
+      setIsIndexing(false);
+    });
+
     return () => {
-      unlisten.then((f) => f());
+      unlistenProgress.then((f) => f());
+      unlistenModelLoaded.then((f) => f());
+      unlistenModelError.then((f) => f());
     };
   }, []);
 

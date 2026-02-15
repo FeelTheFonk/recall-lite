@@ -7,6 +7,7 @@ use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut, ShortcutState};
 use tokio::sync::Mutex;
 use fastembed::EmbeddingModel;
 use std::fs;
+use std::io::Write;
 use serde::Deserialize;
 
 #[derive(Serialize, Deserialize)]
@@ -186,17 +187,37 @@ pub fn run() {
             app.manage(model_state.clone());
             app.manage(Arc::new(Mutex::new(DbState { db, path: db_path })));
 
+            let models_path = app_data.join("models");
+            std::fs::create_dir_all(&models_path).ok();
+
+            let log_path = app_data.join("recall.log");
+            let _ = fs::write(&log_path, "Starting model load...\n");
+
+            let app_handle = app.handle().clone();
+
             // Spawn background task to load model
             tauri::async_runtime::spawn(async move {
-                match indexer::load_model(model_enum) {
+                if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(&log_path) {
+                    let _ = writeln!(file, "Loading model to: {:?}", models_path);
+                }
+                
+                match indexer::load_model(model_enum, models_path) {
                     Ok(model) => {
+                        if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(&log_path) {
+                            let _ = writeln!(file, "Model loaded successfully");
+                        }
                         let mut state = model_state.lock().await;
                         state.model = Some(model);
                         state.init_error = None;
+                        let _ = app_handle.emit("model-loaded", ());
                     }
                     Err(e) => {
+                         if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(&log_path) {
+                            let _ = writeln!(file, "Model load failed: {}", e);
+                         }
                          let mut state = model_state.lock().await;
                          state.init_error = Some(e.to_string());
+                         let _ = app_handle.emit("model-load-error", e.to_string());
                     }
                 }
             });

@@ -23,9 +23,10 @@ struct Record {
     vector: Vec<f32>,
 }
 
-pub fn load_model(model: EmbeddingModel) -> Result<TextEmbedding> {
+pub fn load_model(model: EmbeddingModel, cache_dir: std::path::PathBuf) -> Result<TextEmbedding> {
     let mut options = InitOptions::default();
     options.model_name = model;
+    options.cache_dir = cache_dir;
     
     options.show_download_progress = cfg!(debug_assertions);
 
