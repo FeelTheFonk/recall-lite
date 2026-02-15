@@ -41,6 +41,15 @@ jobs:
       - name: Install frontend dependencies
         run: npm install
 
+      - name: Get tag message
+        id: tag_msg
+        shell: bash
+        run: |
+          git fetch --tags --force
+          echo "message<<EOF" >> $GITHUB_OUTPUT
+          git tag -l --format='%(contents)' ${{ github.ref_name }} >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
       - name: Build the app
         uses: tauri-apps/tauri-action@v0
         env:
@@ -49,10 +58,6 @@ jobs:
           tagName: ${{ github.ref_name }}
           args: --verbose
           releaseName: "Recall Lite ${{ github.ref_name }}"
-          releaseBody: |
-            ## Changes
-            - Fixed model loading hang in production.
-            - Added "Model Loaded" event for better UI feedback.
-            - Added automatic cleanup for legacy cache.
+          releaseBody: ${{ steps.tag_msg.outputs.message }}
           releaseDraft: false
           prerelease: false
