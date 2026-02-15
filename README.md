@@ -43,6 +43,17 @@ npm run tauri build
 - **Ctrl + O**: Index a new folder.
 - **Esc**: Clear search or hide window.
 
+## Configuration
+It's just a JSON file.
+`%AppData%\recall-lite\config.json`
+
+```json
+{
+  "embedding_model": "MultilingualE5Small"
+}
+```
+*Supported models: AllMiniLML6V2, MultilingualE5Small*
+
 ## Performance
 - Tested on 10k files.
 - Indexing takes a bit (it's CPU bound).
