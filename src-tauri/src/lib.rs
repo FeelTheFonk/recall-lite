@@ -1,412 +1,22 @@
+mod commands;
+mod config;
 mod indexer;
+mod state;
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use serde::Serialize;
+use std::fs;
+use std::io::Write;
+
+use serde::Deserialize;
 use tauri::{Emitter, Manager};
 use tauri::menu::{Menu, MenuItem, MenuEvent};
 use tauri::tray::{TrayIcon, TrayIconBuilder, TrayIconEvent};
 use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut, ShortcutState};
 use tokio::sync::Mutex;
-use fastembed::EmbeddingModel;
-use std::fs;
-use std::io::Write;
-use serde::Deserialize;
 
-#[derive(Serialize, Deserialize, Clone)]
-struct ContainerInfo {
-    description: String,
-    indexed_paths: Vec<String>,
-}
-
-#[derive(Serialize, Deserialize, Clone)]
-struct Config {
-    embedding_model: String,
-    containers: HashMap<String, ContainerInfo>,
-    active_container: String,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        let mut containers = HashMap::new();
-        containers.insert("Default".to_string(), ContainerInfo {
-            description: String::new(),
-            indexed_paths: Vec::new(),
-        });
-        Self {
-            embedding_model: "MultilingualE5Small".to_string(),
-            containers,
-            active_container: "Default".to_string(),
-        }
-    }
-}
-
-struct ConfigState {
-    config: Arc<Mutex<Config>>,
-    path: std::path::PathBuf,
-}
-
-impl ConfigState {
-    async fn save(&self) -> Result<(), String> {
-        let config = self.config.lock().await;
-        let content = serde_json::to_string_pretty(&*config).map_err(|e| e.to_string())?;
-        fs::write(&self.path, content).map_err(|e| e.to_string())
-    }
-}
-
-fn get_embedding_model(name: &str) -> EmbeddingModel {
-    match name {
-        "AllMiniLML6V2" => EmbeddingModel::AllMiniLML6V2,
-        "MultilingualE5Small" => EmbeddingModel::MultilingualE5Small,
-        _ => EmbeddingModel::MultilingualE5Small,
-    }
-}
-
-fn get_table_name(container: &str) -> String {
-    let sanitized: String = container.chars().map(|c| {
-        if c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' {
-            c.to_string()
-        } else {
-            format!("{:04x}", c as u32)
-        }
-    }).collect();
-    format!("c_{}", sanitized)
-}
-
-struct DbState {
-    db: lancedb::Connection,
-    path: std::path::PathBuf,
-}
-
-struct ModelState {
-    model: Option<fastembed::TextEmbedding>,
-    init_error: Option<String>,
-}
-
-struct RerankerState {
-    reranker: Option<fastembed::TextRerank>,
-    init_error: Option<String>,
-}
-
-#[derive(Serialize, Clone)]
-pub struct SearchResult {
-    path: String,
-    snippet: String,
-    score: f32,
-}
-
-#[derive(Serialize, Clone)]
-struct ContainerListItem {
-    name: String,
-    description: String,
-    indexed_paths: Vec<String>,
-}
-
-#[tauri::command]
-async fn get_containers(
-    config_state: tauri::State<'_, ConfigState>,
-) -> Result<(Vec<ContainerListItem>, String), String> {
-    let config = config_state.config.lock().await;
-    let list: Vec<ContainerListItem> = config.containers.iter().map(|(name, info)| {
-        ContainerListItem {
-            name: name.clone(),
-            description: info.description.clone(),
-            indexed_paths: info.indexed_paths.clone(),
-        }
-    }).collect();
-    Ok((list, config.active_container.clone()))
-}
-
-#[tauri::command]
-async fn create_container(
-    name: String,
-    description: String,
-    config_state: tauri::State<'_, ConfigState>,
-) -> Result<(), String> {
-    let mut config = config_state.config.lock().await;
-    if config.containers.contains_key(&name) {
-        return Err("Container already exists".to_string());
-    }
-    config.containers.insert(name, ContainerInfo {
-        description,
-        indexed_paths: Vec::new(),
-    });
-    drop(config);
-    config_state.save().await?;
-    Ok(())
-}
-
-#[tauri::command]
-async fn delete_container(
-    name: String,
-    config_state: tauri::State<'_, ConfigState>,
-    db_state: tauri::State<'_, Arc<Mutex<DbState>>>,
-) -> Result<(), String> {
-    {
-        let mut config = config_state.config.lock().await;
-        if name == "Default" {
-            return Err("Cannot delete Default container".to_string());
-        }
-        if config.active_container == name {
-            config.active_container = "Default".to_string();
-        }
-        config.containers.remove(&name);
-    }
-
-    config_state.save().await?;
-
-    let db = {
-        let guard = db_state.lock().await;
-        guard.db.clone()
-    };
-    let table_name = get_table_name(&name);
-    let _ = db.drop_table(&table_name, &[]).await;
-
-    Ok(())
-}
-
-#[tauri::command]
-async fn set_active_container(
-    name: String,
-    config_state: tauri::State<'_, ConfigState>,
-) -> Result<(), String> {
-    let mut config = config_state.config.lock().await;
-    if !config.containers.contains_key(&name) {
-        return Err("Container does not exist".to_string());
-    }
-    config.active_container = name;
-    drop(config);
-    config_state.save().await?;
-    Ok(())
-}
-
-#[tauri::command]
-async fn search(
-    query: String,
-    db_state: tauri::State<'_, Arc<Mutex<DbState>>>,
-    model_state: tauri::State<'_, Arc<Mutex<ModelState>>>,
-    reranker_state: tauri::State<'_, Arc<Mutex<RerankerState>>>,
-    config_state: tauri::State<'_, ConfigState>,
-) -> Result<Vec<SearchResult>, String> {
-    let table_name = {
-        let config = config_state.config.lock().await;
-        get_table_name(&config.active_container)
-    };
-
-    let query_vector = {
-        let mut guard = model_state.lock().await;
-        if let Some(err) = &guard.init_error {
-            return Err(format!("Model init failed: {}", err));
-        }
-        let model = guard.model.as_mut().ok_or("Model is still loading...")?;
-        indexer::embed_query(model, &query)
-            .map_err(|e| e.to_string())?
-    };
-
-    let db = {
-        let guard = db_state.lock().await;
-        guard.db.clone()
-    };
-
-    let vector_results = indexer::search_files(&db, &table_name, &query_vector, 30)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let fts_results = indexer::search_fts(&db, &table_name, &query, 20)
-        .await
-        .unwrap_or_default();
-
-    let merged = if fts_results.is_empty() {
-        vector_results
-    } else {
-        indexer::hybrid_merge(&vector_results, &fts_results, 30)
-    };
-
-    let (final_results, used_reranker) = {
-        let mut guard = reranker_state.lock().await;
-        if let Some(reranker) = guard.reranker.as_mut() {
-            match indexer::rerank_results(reranker, &query, &merged) {
-                Ok(reranked) => (reranked, true),
-                Err(_) => (merged, false),
-            }
-        } else {
-            (merged, false)
-        }
-    };
-
-    let used_hybrid = !fts_results.is_empty();
-
-    let mut scored: Vec<SearchResult> = if used_reranker {
-        final_results
-            .into_iter()
-            .filter_map(|(path, snippet, raw_score)| {
-                let sigmoid = 1.0 / (1.0 + (-raw_score).exp());
-                let pct = sigmoid * 100.0;
-                if pct >= 55.0 {
-                    Some(SearchResult { path, snippet, score: pct })
-                } else {
-                    None
-                }
-            })
-            .collect()
-    } else if used_hybrid {
-        let max_rrf = final_results.first().map(|(_, _, s)| *s).unwrap_or(1.0);
-        final_results
-            .into_iter()
-            .filter_map(|(path, snippet, rrf_score)| {
-                let pct = if max_rrf > 0.0 { (rrf_score / max_rrf) * 100.0 } else { 0.0 };
-                if pct >= 40.0 {
-                    Some(SearchResult { path, snippet, score: pct })
-                } else {
-                    None
-                }
-            })
-            .collect()
-    } else {
-        final_results
-            .into_iter()
-            .filter_map(|(path, snippet, cosine_dist)| {
-                let similarity = (1.0 - cosine_dist).clamp(0.0, 1.0);
-                let calibrated = similarity.powi(3) * 100.0;
-                if calibrated >= 60.0 {
-                    Some(SearchResult { path, snippet, score: calibrated })
-                } else {
-                    None
-                }
-            })
-            .collect()
-    };
-
-    scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-
-    let cutoff = scored.windows(2)
-        .position(|pair| pair[0].score - pair[1].score > 12.0)
-        .map(|i| i + 1);
-
-    if let Some(idx) = cutoff {
-        scored.truncate(idx);
-    }
-
-    Ok(scored)
-}
-
-#[tauri::command]
-async fn index_folder(
-    app: tauri::AppHandle,
-    dir: String,
-    db_state: tauri::State<'_, Arc<Mutex<DbState>>>,
-    model_state: tauri::State<'_, Arc<Mutex<ModelState>>>,
-    config_state: tauri::State<'_, ConfigState>,
-) -> Result<String, String> {
-    let table_name = {
-        let config = config_state.config.lock().await;
-        get_table_name(&config.active_container)
-    };
-
-    {
-        let mut config = config_state.config.lock().await;
-        let active = config.active_container.clone();
-        if let Some(info) = config.containers.get_mut(&active) {
-            if !info.indexed_paths.contains(&dir) {
-                info.indexed_paths.push(dir.clone());
-            }
-        }
-        drop(config);
-        config_state.save().await?;
-    }
-
-    let db = {
-        let guard = db_state.lock().await;
-        guard.db.clone()
-    };
-
-    let mut guard = model_state.lock().await;
-    if let Some(err) = &guard.init_error {
-        return Err(format!("Model init failed: {}", err));
-    }
-    let model = guard.model.as_mut().ok_or("Model is still loading...")?;
-
-    let app_handle = app.clone();
-
-    let count = indexer::index_directory(&dir, &table_name, &db, model, move |path| {
-        let _ = app_handle.emit("indexing-progress", path);
-    })
-    .await
-    .map_err(|e| e.to_string())?;
-
-    Ok(format!("Indexed {} files", count))
-}
-
-#[tauri::command]
-async fn reset_index(
-    db_state: tauri::State<'_, Arc<Mutex<DbState>>>,
-    config_state: tauri::State<'_, ConfigState>,
-) -> Result<String, String> {
-    let table_name = {
-        let config = config_state.config.lock().await;
-        get_table_name(&config.active_container)
-    };
-
-    let path = {
-        let guard = db_state.lock().await;
-        guard.path.clone()
-    };
-    indexer::reset_index(&path, &table_name)
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok("Index cleared successfully".to_string())
-}
-
-#[tauri::command]
-async fn reindex_all(
-    app: tauri::AppHandle,
-    db_state: tauri::State<'_, Arc<Mutex<DbState>>>,
-    model_state: tauri::State<'_, Arc<Mutex<ModelState>>>,
-    config_state: tauri::State<'_, ConfigState>,
-) -> Result<String, String> {
-    let (table_name, paths) = {
-        let config = config_state.config.lock().await;
-        let info = config.containers.get(&config.active_container)
-            .ok_or("Active container not found")?;
-        (get_table_name(&config.active_container), info.indexed_paths.clone())
-    };
-
-    if paths.is_empty() {
-        return Err("No folders to reindex".to_string());
-    }
-
-    let db_path = {
-        let guard = db_state.lock().await;
-        guard.path.clone()
-    };
-    indexer::reset_index(&db_path, &table_name)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let db = {
-        let guard = db_state.lock().await;
-        guard.db.clone()
-    };
-
-    let mut guard = model_state.lock().await;
-    if let Some(err) = &guard.init_error {
-        return Err(format!("Model init failed: {}", err));
-    }
-    let model = guard.model.as_mut().ok_or("Model is still loading...")?;
-
-    let mut total = 0;
-    for dir in &paths {
-        let app_handle = app.clone();
-        let count = indexer::index_directory(dir, &table_name, &db, model, move |path| {
-            let _ = app_handle.emit("indexing-progress", path);
-        })
-        .await
-        .map_err(|e| e.to_string())?;
-        total += count;
-    }
-
-    Ok(format!("Reindexed {} files from {} folders", total, paths.len()))
-}
+use config::{Config, ConfigState, ContainerInfo, get_embedding_model};
+use state::{DbState, ModelState, RerankerState};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -525,7 +135,7 @@ pub fn run() {
                                 });
                             }
                             Config {
-                                embedding_model: old.embedding_model.unwrap_or_else(|| "MultilingualE5Small".to_string()),
+                                embedding_model: old.embedding_model.unwrap_or_else(|| "MultilingualE5Base".to_string()),
                                 active_container: old.active_container.unwrap_or_else(|| "Default".to_string()),
                                 containers,
                             }
@@ -578,6 +188,7 @@ pub fn run() {
                 let mut attempts = 0;
                 let max_attempts = 3;
                 let mut last_error = None;
+                let mut loaded = false;
 
                 while attempts < max_attempts {
                     attempts += 1;
@@ -590,6 +201,7 @@ pub fn run() {
                             state.model = Some(model);
                             state.init_error = None;
                             let _ = app_handle.emit("model-loaded", ());
+                            loaded = true;
                             break;
                         }
                         Err(e) => {
@@ -602,10 +214,12 @@ pub fn run() {
                     }
                 }
 
-                if let Some(e) = last_error {
-                    let mut state = model_state.lock().await;
-                    state.init_error = Some(e.to_string());
-                    let _ = app_handle.emit("model-load-error", e.to_string());
+                if !loaded {
+                    if let Some(e) = last_error {
+                        let mut state = model_state.lock().await;
+                        state.init_error = Some(e.to_string());
+                        let _ = app_handle.emit("model-load-error", e.to_string());
+                    }
                 }
             });
 
@@ -643,14 +257,14 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            search,
-            index_folder,
-            reset_index,
-            reindex_all,
-            get_containers,
-            create_container,
-            delete_container,
-            set_active_container
+            commands::search,
+            commands::index_folder,
+            commands::reset_index,
+            commands::reindex_all,
+            commands::get_containers,
+            commands::create_container,
+            commands::delete_container,
+            commands::set_active_container
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -10,60 +10,56 @@ So I built this.
 
 ## What is this?
 It's a **local-first** semantic search engine.
-- indexes your files (PDF, txt, md, code)
+- indexes your files (PDF, images, txt, md, code — 50+ formats)
+- **OCR support** — extracts text from PNG, JPG, BMP, TIFF via Windows built-in OCR
 - stores vectors locally (LanceDB)
-- runs a tiny BERT model on your CPU (fastembed-rs)
+- hybrid search: vector + full-text + JINA reranker
+- **semantic containers** — isolate work, personal, research files
 - **0% data leaves your machine.**
 
 ## Why?
 I have thousands of PDFs and notes. I don't remember filenames. I remember "that invoice about server costs" or "the rust code where I fixed the memory leak".
 Typical regex search fails here. Vector search doesn't.
 
-## Tech Stack (The good stuff)
-- **Frontend**: React + TypeScript + Tailwind (because it works)
-- **Backend**: Rust (fast af)
+## Tech Stack
+- **Frontend**: React + TypeScript (Vite)
+- **Backend**: Rust (Tauri 2)
 - **Vectors**: [LanceDB](https://lancedb.com/) (embedded, no docker junk)
-- **Model**: `Multilingual-E5-small` (runs on a potato)
+- **Embedding**: `Multilingual-E5-Base` (768-dim, ~280MB)
+- **Reranker**: `JINA Reranker v2` (multilingual)
+- **OCR**: Windows.Media.Ocr (built-in, zero install)
 - **UI**: Windows 11 Fluent / Mica (looks native)
 
 ## How to run
 You need Rust and Node installed.
 
 ```bash
-# install deps
 npm install
-
-# run dev (it will download the model on first run, ~100mb)
-npm run tauri dev
-
-# build release
-npm run tauri build
+npm run tauri dev        # dev (downloads model on first run, ~280mb)
+npm run tauri build      # release
 ```
 
 ## Usage
-- **Alt + Space**: Toggle the search bar instantly (Global Shortcut).
-- **Ctrl + O**: Index a new folder.
-- **Esc**: Clear search or hide window.
+- **Alt + Space**: Toggle the search bar (global shortcut)
+- **Ctrl + O**: Index a new folder
+- **Esc**: Clear search or hide window
 
 ## Configuration
-It's just a JSON file.
-`%AppData%\recall-lite\config.json`
+`%AppData%\com.recall-lite.app\config.json`
 
 ```json
 {
-  "embedding_model": "MultilingualE5Small"
+  "embedding_model": "MultilingualE5Base",
+  "containers": { ... },
+  "active_container": "Default"
 }
 ```
-*Supported models: AllMiniLML6V2, MultilingualE5Small*
+*Supported models: AllMiniLML6V2, MultilingualE5Small, MultilingualE5Base*
 
 ## Performance
-- Tested on 10k files.
-- Indexing takes a bit (it's CPU bound).
-- Search is <50ms.
-
-## disclaimer
-code is a bit messy. it works on my machine.
-pull requests welcome if you want to fix my terrible react hooks.
+- Tested on 10k+ files
+- Indexing is CPU-bound (first run takes a few minutes)
+- Search is <50ms (release build)
 
 ## License
 MIT. Do whatever.

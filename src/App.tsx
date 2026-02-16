@@ -1,94 +1,19 @@
 import { useRef, useEffect, useState } from "react";
-import { List, type ListImperativeAPI } from "react-window";
+import type { ListImperativeAPI } from "react-window";
 import { invoke } from "@tauri-apps/api/core";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
-import {
-  FileText, FileCode, FileJson, Image as ImageIcon, File,
-  Loader2, FolderPlus, Search, Box, Plus, Trash2, FolderOpen,
-  PanelLeftClose, PanelLeftOpen, Folder, RefreshCw
-} from "lucide-react";
 import { useModal, ModalProvider } from "./Modal";
+import Sidebar from "./components/Sidebar";
+import SearchBar from "./components/SearchBar";
+import ResultsList from "./components/ResultsList";
+import StatusBar from "./components/StatusBar";
+import type { SearchResult, IndexingProgress, ContainerItem } from "./types";
 import "./App.css";
-
-interface SearchResult {
-  path: string;
-  snippet: string;
-  score: number;
-}
-
-function getScoreColor(score: number): string {
-  if (score > 75) return "bg-green-500/10 text-green-400";
-  if (score > 60) return "bg-yellow-500/10 text-yellow-400";
-  return "bg-orange-500/10 text-orange-400";
-}
 
 function getFileName(path: string): string {
   return path.split(/[\\/]/).pop() || path;
-}
-
-function getFileIcon(path: string) {
-  const ext = path.split(".").pop()?.toLowerCase() || "";
-  const props = { className: "w-5 h-5 text-gray-400" };
-  switch (ext) {
-    case "pdf": return <FileText {...props} />;
-    case "txt": case "md": return <FileText {...props} />;
-    case "rs": case "ts": case "js": case "py": return <FileCode {...props} />;
-    case "json": return <FileJson {...props} />;
-    case "png": case "jpg": return <ImageIcon {...props} />;
-    default: return <File {...props} />;
-  }
-}
-
-interface RowData {
-  results: SearchResult[];
-  selectedIndex: number;
-  setSelectedIndex: (index: number) => void;
-  handleOpenFile: (path: string) => void;
-}
-
-const Row = ({ index, style, results, selectedIndex, setSelectedIndex, handleOpenFile }: { index: number; style: React.CSSProperties } & RowData) => {
-  const result = results[index];
-  const isSelected = index === selectedIndex;
-
-  return (
-    <div style={style} className="px-3">
-      <button
-        type="button"
-        key={result.path}
-        data-active={isSelected}
-        onClick={() => { setSelectedIndex(index); handleOpenFile(result.path); }}
-        className="result-item w-full text-left flex items-start gap-3 cursor-default outline-none select-none group h-full"
-      >
-        <div className="pt-0.5 shrink-0 opacity-80 group-hover:opacity-100 transition-opacity">
-          {getFileIcon(result.path)}
-        </div>
-        <div className="flex-1 min-w-0">
-          <div className="flex justify-between items-baseline gap-2">
-            <h4 className="text-body truncate leading-tight">
-              {getFileName(result.path)}
-            </h4>
-            <span className={`text-[10px] font-sans px-1.5 rounded-full shrink-0 ${getScoreColor(result.score)} bg-opacity-20`}>
-              {Math.round(result.score)}%
-            </span>
-          </div>
-          <div className="truncate text-caption mt-0.5 opacity-60">
-            {result.snippet || <span className="italic opacity-50">No preview available</span>}
-          </div>
-          <div className="truncate text-[10px] opacity-40 mt-0.5 font-mono">
-            {result.path}
-          </div>
-        </div>
-      </button>
-    </div>
-  );
-};
-
-interface ContainerItem {
-  name: string;
-  description: string;
-  indexed_paths: string[];
 }
 
 function App() {
@@ -97,6 +22,7 @@ function App() {
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [status, setStatus] = useState("");
   const [isIndexing, setIsIndexing] = useState(false);
+  const [indexProgress, setIndexProgress] = useState<IndexingProgress | null>(null);
 
   const [containers, setContainers] = useState<ContainerItem[]>([]);
   const [activeContainer, setActiveContainer] = useState("Default");
@@ -104,19 +30,7 @@ function App() {
   const modal = useModal();
 
   const searchInputRef = useRef<HTMLInputElement>(null);
-  const resultsRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<ListImperativeAPI>(null);
-  const [listDims, setListDims] = useState({ width: 0, height: 0 });
-
-  useEffect(() => {
-    if (!resultsRef.current) return;
-    const observer = new ResizeObserver(entries => {
-      const { width, height } = entries[0].contentRect;
-      setListDims({ width, height });
-    });
-    observer.observe(resultsRef.current);
-    return () => observer.disconnect();
-  }, []);
 
   useEffect(() => {
     fetchContainers();
@@ -183,7 +97,7 @@ function App() {
     try {
       await invoke("set_active_container", { name });
       setActiveContainer(name);
-      setResults([]); // Clear results from previous container
+      setResults([]);
       setQuery("");
       setStatus(`Switched to ${name}`);
       searchInputRef.current?.focus();
@@ -192,22 +106,9 @@ function App() {
     }
   }
 
-
-
-
-  useEffect(() => {
-    if (listRef.current && results.length > 0) {
-      listRef.current.scrollToRow({ index: selectedIndex });
-    }
-  }, [selectedIndex, results]);
-
-
-
-
   useEffect(() => {
     searchInputRef.current?.focus();
     const handleKeyDown = (e: KeyboardEvent) => {
-      // ... existing key handlers ...
       if (e.key === "ArrowDown") {
         e.preventDefault();
         setSelectedIndex(prev => Math.min(prev + 1, results.length - 1));
@@ -224,10 +125,15 @@ function App() {
         handlePickFolder();
       } else if (e.shiftKey && e.key === "Delete") {
         e.preventDefault();
-        // Context-aware delete
-        if (confirm(`Clear index for '${activeContainer}'?`)) {
-          handleResetIndex();
-        }
+        modal.confirm({
+          title: "Clear Index",
+          message: `Clear index for '${activeContainer}'?`,
+          icon: "warning",
+          confirmText: "Clear",
+          confirmVariant: "danger",
+        }).then((result) => {
+          if (result.confirmed) handleResetIndex();
+        });
       } else if (e.key === "Escape") {
         if (query) setQuery("");
       }
@@ -237,23 +143,34 @@ function App() {
   }, [results, selectedIndex, query, activeContainer]);
 
   useEffect(() => {
-    const unlistenProgress = listen<string>("indexing-progress", (event) => {
-      setStatus(`Indexing: ${getFileName(event.payload)}`);
+    const unlistenProgress = listen<IndexingProgress>("indexing-progress", (event) => {
+      setStatus(`Indexing: ${getFileName(event.payload.path)}`);
+      setIndexProgress(event.payload);
       setIsIndexing(true);
+    });
+
+    const unlistenComplete = listen<string>("indexing-complete", (event) => {
+      setStatus(`Done — ${event.payload}`);
+      setIsIndexing(false);
+      setIndexProgress(null);
+      setTimeout(() => setStatus(""), 5000);
     });
 
     const unlistenModelLoaded = listen("model-loaded", () => {
       setStatus("");
       setIsIndexing(false);
+      setIndexProgress(null);
     });
 
     const unlistenModelError = listen<string>("model-load-error", (event) => {
       setStatus(`Model Error: ${event.payload}`);
       setIsIndexing(false);
+      setIndexProgress(null);
     });
 
     return () => {
       unlistenProgress.then((f) => f());
+      unlistenComplete.then((f) => f());
       unlistenModelLoaded.then((f) => f());
       unlistenModelError.then((f) => f());
     };
@@ -270,7 +187,12 @@ function App() {
         setResults(res);
         setSelectedIndex(0);
       } catch (err) {
-        setStatus(String(err));
+        const msg = String(err);
+        if (msg.includes("rebuild") || msg.includes("Model changed")) {
+          setStatus("Index needs rebuild — click Rebuild Index");
+        } else {
+          setStatus(msg);
+        }
       }
     }, 150);
     return () => clearTimeout(timer);
@@ -346,173 +268,48 @@ function App() {
     }
   }
 
-  // Helpers
-
+  const activeInfo = containers.find(c => c.name === activeContainer);
 
   return (
     <>
       <div className="app-container">
-
-        {/* Sidebar */}
-        <div className={`sidebar ${sidebarOpen ? '' : 'collapsed'}`}>
-          <div className="sidebar-header">
-            <button className="sidebar-btn" onClick={() => setSidebarOpen(prev => !prev)} title={sidebarOpen ? 'Collapse sidebar' : 'Expand sidebar'}>
-              {sidebarOpen ? <PanelLeftClose size={14} /> : <PanelLeftOpen size={14} />}
-            </button>
-            {sidebarOpen && (
-              <>
-                <span className="sidebar-title flex-1">Containers</span>
-                <button className="sidebar-btn" onClick={handleCreateContainer} title="Create Container">
-                  <Plus size={14} />
-                </button>
-              </>
-            )}
-          </div>
-          {sidebarOpen && (
-            <>
-              <div className="container-list">
-                {containers.map(c => (
-                  <div key={c.name} className="container-item-wrapper">
-                    <button
-                      type="button"
-                      className={`container-item w-full text-left ${activeContainer === c.name ? 'active' : ''}`}
-                      onClick={() => handleSwitchContainer(c.name)}
-                    >
-                      <Box size={14} className="icon" />
-                      <div className="flex-1 min-w-0">
-                        <span className="truncate block">{c.name}</span>
-                        {c.description && (
-                          <span className="truncate block text-[10px] opacity-40 mt-0.5">{c.description}</span>
-                        )}
-                      </div>
-                    </button>
-                    {activeContainer === c.name && (
-                      <div className="indexed-paths-section">
-                        <div className="indexed-paths-header">
-                          <Folder size={10} className="opacity-40" />
-                          <span>Indexed Folders</span>
-                        </div>
-                        {c.indexed_paths.length > 0 ? (
-                          <>
-                            <div className="indexed-paths">
-                              {c.indexed_paths.map(p => (
-                                <div key={p} className="indexed-path-item" title={p}>
-                                  <FolderOpen size={10} className="shrink-0 opacity-50" />
-                                  <span className="truncate">{p.split(/[\\/]/).slice(-2).join('/')}</span>
-                                </div>
-                              ))}
-                            </div>
-                            <button
-                              className="reindex-btn"
-                              onClick={handleReindexAll}
-                              disabled={isIndexing}
-                              title="Re-index all folders with improved embeddings"
-                            >
-                              <RefreshCw size={10} className={isIndexing ? 'animate-spin' : ''} />
-                              <span>Rebuild Index</span>
-                            </button>
-                          </>
-                        ) : (
-                          <div className="indexed-paths-empty">
-                            No folders indexed yet
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
-              {activeContainer !== "Default" && (
-                <button
-                  className="flex items-center justify-center gap-2 p-2 text-[11px] text-red-400/80 hover:text-red-400 hover:bg-red-500/10 rounded transition-colors"
-                  onClick={handleDeleteContainer}
-                >
-                  <Trash2 size={12} /> Delete Container
-                </button>
-              )}
-            </>
-          )}
-        </div>
-
-        {/* Main Content */}
+        <Sidebar
+          containers={containers}
+          activeContainer={activeContainer}
+          isIndexing={isIndexing}
+          sidebarOpen={sidebarOpen}
+          onToggleSidebar={() => setSidebarOpen(prev => !prev)}
+          onSwitchContainer={handleSwitchContainer}
+          onCreateContainer={handleCreateContainer}
+          onDeleteContainer={handleDeleteContainer}
+          onReindexAll={handleReindexAll}
+        />
         <div className="main-content">
-          {/* Search Header */}
-          <div className="search-wrapper shrink-0">
-            <div className="relative">
-              <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-[--color-text-tertiary] pointer-events-none" size={18} />
-              <input
-                ref={searchInputRef}
-                type="text"
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder={`Search in ${activeContainer}...`}
-                className="search-input"
-                autoFocus
-              />
-              <button
-                onClick={handlePickFolder}
-                className="absolute right-4 top-1/2 -translate-y-1/2 p-2 rounded-md hover:bg-[--color-control-fill-secondary] text-[--color-text-secondary] transition-colors"
-                title={`Index Folder into ${activeContainer} (Ctrl+O)`}
-              >
-                {isIndexing ? <Loader2 className="animate-spin" size={18} /> : <FolderPlus size={18} />}
-              </button>
-            </div>
-          </div>
-
-          {/* Results Area */}
-          <div className="flex-1 overflow-hidden min-h-0 mt-2 pb-3" ref={resultsRef}>
-            {results.length === 0 && !query && (
-              <div className="h-full flex flex-col items-center justify-center text-[--color-text-muted] select-none opacity-60">
-                <Box size={40} className="mb-4 opacity-40 text-[--color-fill-accent-default]" strokeWidth={1} />
-                <p className="text-body font-medium">{activeContainer}</p>
-                <p className="text-caption mt-1">Container Active</p>
-
-                <div className="mt-8 flex flex-col gap-2 items-center">
-                  <p className="text-[10px] uppercase tracking-wider opacity-60">Shortcuts</p>
-                  <div className="flex gap-4 opacity-50 text-xs font-mono">
-                    <span>Ctrl + O : Index</span>
-                    <span>Alt + Space : Toggle</span>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {results.length === 0 && query && (
-              <div className="h-full flex flex-col items-center justify-center text-[--color-text-muted] select-none opacity-60">
-                <p className="text-body font-medium">No results found</p>
-                <p className="text-caption mt-1">in {activeContainer}</p>
-              </div>
-            )}
-
-            {results.length > 0 && listDims.height > 0 && (
-              <List<RowData>
-                listRef={listRef}
-                style={{ width: listDims.width, height: listDims.height }}
-                rowCount={results.length}
-                rowHeight={78}
-                rowProps={{ results, selectedIndex, setSelectedIndex, handleOpenFile: (p: string) => { handleOpenFile(p).catch(() => { }); } }}
-                className="result-list-virtualized"
-                rowComponent={Row}
-              />
-            )}
-          </div>
-
-          {/* Status Bar Footer */}
-          <div className="status-bar shrink-0 h-8 px-6 flex items-center justify-between text-[11px] select-none text-[--color-text-secondary]">
-            <div className="flex items-center gap-3 overflow-hidden">
-              <span className="font-semibold text-[--color-fill-accent-default] opacity-90">{activeContainer}</span>
-              <span className="w-px h-3 bg-[--color-stroke-divider-default]"></span>
-              {status ? (
-                <span className="flex items-center gap-2 truncate"><Loader2 className="animate-spin" size={10} /> {status}</span>
-              ) : (
-                <span>Indexed {containers.find(c => c.name === activeContainer)?.indexed_paths.length || 0} folders · {results.length} results</span>
-              )}
-            </div>
-            <div className="flex items-center gap-4 opacity-80 px-2">
-              <span className="flex items-center gap-1.5"><span className="font-mono text-[10px] bg-[--color-control-fill-secondary] px-1.5 py-0.5 rounded">↑↓</span> to navigate</span>
-              <span className="flex items-center gap-1.5"><span className="font-mono text-[10px] bg-[--color-control-fill-secondary] px-1.5 py-0.5 rounded">↵</span> to open</span>
-            </div>
-          </div>
+          <SearchBar
+            query={query}
+            onQueryChange={setQuery}
+            activeContainer={activeContainer}
+            isIndexing={isIndexing}
+            onPickFolder={handlePickFolder}
+            inputRef={searchInputRef}
+          />
+          <ResultsList
+            results={results}
+            selectedIndex={selectedIndex}
+            setSelectedIndex={setSelectedIndex}
+            activeContainer={activeContainer}
+            query={query}
+            onOpenFile={(p) => { handleOpenFile(p).catch(() => { }); }}
+            listRef={listRef}
+          />
+          <StatusBar
+            status={status}
+            isIndexing={isIndexing}
+            indexProgress={indexProgress}
+            activeContainer={activeContainer}
+            indexedFolderCount={activeInfo?.indexed_paths.length || 0}
+            resultCount={results.length}
+          />
         </div>
       </div>
       <ModalProvider />

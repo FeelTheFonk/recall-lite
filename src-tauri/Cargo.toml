@@ -25,12 +25,25 @@ arrow-schema = "57"
 fastembed = "5"
 pdf-extract = "0.10"
 walkdir = "2"
+regex = "1"
 futures = { version = "0.3", default-features = false, features = ["alloc"] }
 anyhow = "1"
+kamadak-exif = "0.5"
+reverse_geocoder = "4"
+chrono = "0.4"
 mimalloc = { version = "0.1", default-features = false }
 tauri-plugin-global-shortcut = "2"
 
 window-vibrancy = "0.7.1"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = [
+    "Graphics_Imaging",
+    "Media_Ocr",
+    "Storage",
+    "Storage_Streams",
+    "Globalization",
+] }
 tauri-plugin-opener = "2.5.3"
 
 [profile.release]
