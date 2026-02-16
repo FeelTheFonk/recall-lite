@@ -90,7 +90,7 @@ fn get_file_mtime(path: &Path) -> i64 {
 pub fn load_model(model: EmbeddingModel, cache_dir: std::path::PathBuf) -> Result<TextEmbedding> {
     let mut options = InitOptions::default();
     options.model_name = model;
-    options.cache_dir = cache_dir.clone();
+    options.cache_dir = cache_dir;
     options.show_download_progress = cfg!(debug_assertions);
     TextEmbedding::try_new(options)
 }
@@ -222,9 +222,8 @@ where
         return Ok(0);
     }
 
-    let mut files_indexed = 0;
     let file_set: std::collections::HashSet<&str> = pending_chunks.iter().map(|c| c.path.as_str()).collect();
-    files_indexed = file_set.len();
+    let files_indexed = file_set.len();
 
     for batch_start in (0..pending_chunks.len()).step_by(EMBED_BATCH_SIZE) {
         let batch_end = (batch_start + EMBED_BATCH_SIZE).min(pending_chunks.len());

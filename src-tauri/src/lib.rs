@@ -222,25 +222,40 @@ async fn search(
         indexer::hybrid_merge(&vector_results, &fts_results, 30)
     };
 
-    let final_results = {
+    let (final_results, used_reranker) = {
         let mut guard = reranker_state.lock().await;
         if let Some(reranker) = guard.reranker.as_mut() {
             match indexer::rerank_results(reranker, &query, &merged) {
-                Ok(reranked) => reranked,
-                Err(_) => merged,
+                Ok(reranked) => (reranked, true),
+                Err(_) => (merged, false),
             }
         } else {
-            merged
+            (merged, false)
         }
     };
 
-    let mut scored: Vec<SearchResult> = if final_results.first().map(|(_, _, s)| *s > 1.0 || *s < -1.0).unwrap_or(false) {
+    let used_hybrid = !fts_results.is_empty();
+
+    let mut scored: Vec<SearchResult> = if used_reranker {
         final_results
             .into_iter()
             .filter_map(|(path, snippet, raw_score)| {
                 let sigmoid = 1.0 / (1.0 + (-raw_score).exp());
                 let pct = sigmoid * 100.0;
                 if pct >= 55.0 {
+                    Some(SearchResult { path, snippet, score: pct })
+                } else {
+                    None
+                }
+            })
+            .collect()
+    } else if used_hybrid {
+        let max_rrf = final_results.first().map(|(_, _, s)| *s).unwrap_or(1.0);
+        final_results
+            .into_iter()
+            .filter_map(|(path, snippet, rrf_score)| {
+                let pct = if max_rrf > 0.0 { (rrf_score / max_rrf) * 100.0 } else { 0.0 };
+                if pct >= 40.0 {
                     Some(SearchResult { path, snippet, score: pct })
                 } else {
                     None
