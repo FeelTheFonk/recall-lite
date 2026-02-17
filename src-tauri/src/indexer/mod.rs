@@ -44,8 +44,10 @@ where
     let total_files = all_files.len();
 
     let mut pending_chunks: Vec<db::PendingChunk> = Vec::new();
+    let mut files_indexed_set: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut files_seen = 0;
     let mut current_file = 0;
+    let mut batches_written = 0;
 
     for path in &all_files {
         current_file += 1;
@@ -77,6 +79,7 @@ where
             .unwrap_or("")
             .to_lowercase();
         let chunks = chunking::semantic_chunk(&text, &ext);
+        files_indexed_set.insert(path_str.clone());
         for chunk in chunks {
             pending_chunks.push(db::PendingChunk {
                 path: path_str.clone(),
@@ -87,37 +90,56 @@ where
 
         progress_callback(current_file, total_files, path_str);
         files_seen += 1;
+
+        if pending_chunks.len() >= EMBED_BATCH_SIZE {
+            batches_written += 1;
+            progress_callback(
+                current_file,
+                total_files,
+                format!("Embedding batch {}", batches_written),
+            );
+
+            let batch_chunks: Vec<db::PendingChunk> = pending_chunks.drain(..).collect();
+            let texts: Vec<String> = batch_chunks.iter().map(|c| c.content.clone()).collect();
+            let embeddings = embedding::embed_passages(model, texts)?;
+
+            let records: Vec<db::Record> = batch_chunks
+                .into_iter()
+                .zip(embeddings)
+                .map(|(chunk, vector)| db::Record {
+                    path: chunk.path,
+                    content: chunk.content,
+                    vector,
+                    mtime: chunk.mtime,
+                })
+                .collect();
+
+            let batch = db::create_record_batch(records)?;
+            let schema = batch.schema();
+            table
+                .add(RecordBatchIterator::new(vec![Ok(batch)], schema))
+                .execute()
+                .await?;
+        }
     }
 
-    if pending_chunks.is_empty() {
-        progress_callback(total_files, total_files, "Done -- no new files".to_string());
-        return Ok(0);
-    }
-
-    let file_set: std::collections::HashSet<&str> = pending_chunks.iter().map(|c| c.path.as_str()).collect();
-    let files_indexed = file_set.len();
-
-    let total_batches = (pending_chunks.len() + EMBED_BATCH_SIZE - 1) / EMBED_BATCH_SIZE;
-
-    for (batch_idx, batch_start) in (0..pending_chunks.len()).step_by(EMBED_BATCH_SIZE).enumerate() {
-        let batch_end = (batch_start + EMBED_BATCH_SIZE).min(pending_chunks.len());
-        let batch_chunks = &pending_chunks[batch_start..batch_end];
-
+    if !pending_chunks.is_empty() {
+        batches_written += 1;
         progress_callback(
             total_files,
             total_files,
-            format!("Embedding batch {}/{}", batch_idx + 1, total_batches),
+            format!("Embedding batch {}", batches_written),
         );
 
-        let texts: Vec<String> = batch_chunks.iter().map(|c| c.content.clone()).collect();
+        let texts: Vec<String> = pending_chunks.iter().map(|c| c.content.clone()).collect();
         let embeddings = embedding::embed_passages(model, texts)?;
 
-        let records: Vec<db::Record> = batch_chunks
-            .iter()
+        let records: Vec<db::Record> = pending_chunks
+            .into_iter()
             .zip(embeddings)
             .map(|(chunk, vector)| db::Record {
-                path: chunk.path.clone(),
-                content: chunk.content.clone(),
+                path: chunk.path,
+                content: chunk.content,
                 vector,
                 mtime: chunk.mtime,
             })
@@ -129,6 +151,13 @@ where
             .add(RecordBatchIterator::new(vec![Ok(batch)], schema))
             .execute()
             .await?;
+    }
+
+    let files_indexed = files_indexed_set.len();
+
+    if files_indexed == 0 {
+        progress_callback(total_files, total_files, "Done -- no new files".to_string());
+        return Ok(0);
     }
 
     if files_seen >= ANN_INDEX_THRESHOLD {
