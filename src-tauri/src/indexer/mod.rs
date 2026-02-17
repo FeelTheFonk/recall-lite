@@ -15,7 +15,7 @@ use tokio::sync::Mutex;
 
 use crate::state::ModelState;
 
-use walkdir::WalkDir;
+use ignore::WalkBuilder;
 
 pub use chunking::expand_query;
 pub use db::reset_index;
@@ -67,10 +67,14 @@ where
 
     let existing_mtimes = db::get_indexed_mtimes(&table).await.unwrap_or_default();
 
-    let all_files: Vec<_> = WalkDir::new(root_dir)
-        .into_iter()
+    let all_files: Vec<_> = WalkBuilder::new(root_dir)
+        .hidden(true)
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .build()
         .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file())
+        .filter(|e| e.file_type().map_or(false, |ft| ft.is_file()))
         .map(|e| e.into_path())
         .collect();
     let total_files = all_files.len();

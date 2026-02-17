@@ -12,6 +12,18 @@ use crate::config::{get_table_name, ConfigState};
 use crate::indexer;
 use crate::state::{IndexingProgress, ModelState};
 
+fn build_gitignore(roots: &[String]) -> Option<ignore::gitignore::Gitignore> {
+    if roots.is_empty() { return None; }
+    let mut builder = ignore::gitignore::GitignoreBuilder::new(&roots[0]);
+    for root in roots {
+        let gi = std::path::Path::new(root).join(".gitignore");
+        if gi.exists() {
+            let _ = builder.add(gi);
+        }
+    }
+    builder.build().ok()
+}
+
 pub struct WatcherHandle {
     _debouncer: Debouncer<notify::RecommendedWatcher, RecommendedCache>,
 }
@@ -72,6 +84,8 @@ fn start_watcher(
         let _ = debouncer.watch(p, RecursiveMode::Recursive);
     }
 
+    let gitignore = build_gitignore(&paths);
+
     let rt = tokio::runtime::Handle::current();
     let indexing_lock = Arc::new(Mutex::new(()));
     std::thread::spawn(move || {
@@ -84,14 +98,22 @@ fn start_watcher(
                 match event.kind {
                     EventKind::Create(_) | EventKind::Modify(_) => {
                         for p in &event.paths {
-                            if p.is_file() {
+                            let dominated = gitignore.as_ref().map_or(false, |gi| {
+                                gi.matched_path_or_any_parents(p, false).is_ignore()
+                            });
+                            if p.is_file() && !dominated {
                                 changed.insert(p.clone());
                             }
                         }
                     }
                     EventKind::Remove(_) => {
                         for p in &event.paths {
-                            deleted.insert(p.clone());
+                            let dominated = gitignore.as_ref().map_or(false, |gi| {
+                                gi.matched_path_or_any_parents(p, false).is_ignore()
+                            });
+                            if !dominated {
+                                deleted.insert(p.clone());
+                            }
                         }
                     }
                     _ => {}
