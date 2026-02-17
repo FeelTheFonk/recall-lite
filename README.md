@@ -8,6 +8,8 @@ So I built this.
 
 ![Search](https://github.com/user-attachments/assets/98407df3-1984-4f3d-9cd5-21cbfdc4cb85)
 
+Spotlight can’t find what you mean. This can.
+
 ## What is this?
 It's a **local-first** semantic search engine.
 - indexes your files (PDF, images, txt, md, code — 50+ formats)
