@@ -48,6 +48,7 @@ rayon = "1.10"
 # File watching
 notify-debouncer-full = "0.5"
 ignore = "0.4"
+git2 = { version = "0.20", default-features = false }
 
 # Image metadata
 kamadak-exif = "0.5"

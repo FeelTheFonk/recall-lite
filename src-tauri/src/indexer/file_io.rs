@@ -146,7 +146,15 @@ pub fn is_text_extension_with_config(ext: &str, config: &IndexingConfig) -> bool
     config.extra_extensions.iter().any(|e| e == ext)
 }
 
+const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
+
 pub fn read_file_content(path: &Path) -> Option<String> {
+    if let Ok(meta) = fs::metadata(path) {
+        if meta.len() > MAX_FILE_SIZE {
+            return None;
+        }
+    }
+
     let ext = path
         .extension()
         .and_then(|s| s.to_str())
@@ -174,6 +182,12 @@ pub fn read_file_content(path: &Path) -> Option<String> {
 }
 
 pub fn read_file_content_with_config(path: &Path, config: &IndexingConfig) -> Option<String> {
+    if let Ok(meta) = fs::metadata(path) {
+        if meta.len() > MAX_FILE_SIZE {
+            return None;
+        }
+    }
+
     let ext = path
         .extension()
         .and_then(|s| s.to_str())
@@ -204,7 +218,7 @@ pub fn read_file_content_with_config(path: &Path, config: &IndexingConfig) -> Op
     }
 }
 
-pub fn read_file_content_with_ocr(path: &Path) -> Option<String> {
+pub async fn read_file_content_with_ocr(path: &Path) -> Option<String> {
     let ext = path
         .extension()
         .and_then(|s| s.to_str())
@@ -212,11 +226,7 @@ pub fn read_file_content_with_ocr(path: &Path) -> Option<String> {
         .to_lowercase();
 
     if super::ocr::is_image_extension(&ext) {
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(super::ocr::extract_text_from_image(path))
-                .ok()
-        })
+        super::ocr::extract_text_from_image(path).await.ok()
     } else {
         read_file_content(path)
     }

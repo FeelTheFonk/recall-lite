@@ -55,8 +55,11 @@ pub async fn restart(
             .get(&config.active_container)
             .map(|info| info.indexed_paths.clone())
             .unwrap_or_default();
+        let use_git_history = config.indexing.use_git_history;
+        let chunk_size = config.indexing.chunk_size;
+        let chunk_overlap = config.indexing.chunk_overlap;
         drop(config);
-        start_watcher(paths, db, model_state, table_name, tx)
+        start_watcher(paths, db, model_state, table_name, tx, use_git_history, chunk_size, chunk_overlap)
     };
 
     let mut guard = watcher_state.lock().await;
@@ -69,6 +72,9 @@ fn start_watcher(
     model_state: Arc<Mutex<ModelState>>,
     table_name: String,
     tx: EventSender,
+    use_git_history: bool,
+    chunk_size: Option<usize>,
+    chunk_overlap: Option<usize>,
 ) -> Option<WatcherHandle> {
     if paths.is_empty() {
         return None;
@@ -156,12 +162,16 @@ fn start_watcher(
 
                 for path in &deleted {
                     let path_str = path.to_string_lossy().to_string();
-                    let _ = indexer::delete_file_from_index(&path_str, &tn, &db).await;
+                    if let Err(e) = indexer::delete_file_from_index(&path_str, &tn, &db).await {
+                        eprintln!("watcher: delete {:?}: {}", path, e);
+                    }
                     count += 1;
                 }
 
                 for path in &changed {
-                    let _ = indexer::index_single_file(path, &tn, &db, &ms).await;
+                    if let Err(e) = indexer::index_single_file(path, &tn, &db, &ms, use_git_history, chunk_size, chunk_overlap).await {
+                        eprintln!("watcher: index {:?}: {}", path, e);
+                    }
                     count += 1;
                     let _ = tx.send(AppEvent::IndexingProgress {
                         current: count,

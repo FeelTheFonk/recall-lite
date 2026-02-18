@@ -47,6 +47,8 @@ struct SearchParams {
     path_prefix: Option<String>,
     #[schemars(description = "Max snippet size in bytes (default 1500, max 10000)")]
     context_bytes: Option<usize>,
+    #[schemars(description = "Minimum relevance score 0-100 to include in results (default 0)")]
+    min_score: Option<f32>,
 }
 
 #[derive(Serialize)]
@@ -147,7 +149,7 @@ impl RecallServer {
     )]
     async fn recall_search(
         &self,
-        Parameters(SearchParams { query, container, top_k, file_extensions, path_prefix, context_bytes }): Parameters<SearchParams>,
+        Parameters(SearchParams { query, container, top_k, file_extensions, path_prefix, context_bytes, min_score }): Parameters<SearchParams>,
     ) -> Result<CallToolResult, McpError> {
         let container =
             container.unwrap_or_else(|| self.state.config.active_container.clone());
@@ -216,91 +218,40 @@ impl RecallServer {
         let rerank_input: Vec<(String, String, f32)> =
             merged.into_iter().take(top_k * 2).collect();
 
+        let used_hybrid = !fts_results.is_empty();
+
         let (final_results, used_reranker) = {
-            let mut guard = self.state.models.lock().await;
-            if let Some(reranker) = guard.reranker.take() {
-                let query_clone = query.clone();
-                let input_clone = rerank_input.clone();
-                match tokio::task::spawn_blocking(move || {
-                    let mut r = reranker;
-                    let res =
-                        indexer::rerank_results(&mut r, &query_clone, &input_clone);
-                    (r, res)
-                })
-                .await
+            let reranker_opt = {
+                let mut guard = self.state.models.lock().await;
+                guard.reranker.take()
+            };
+            if let Some(reranker) = reranker_opt {
+                let (reranker_back, results, used) =
+                    indexer::safe_rerank(reranker, query.clone(), rerank_input).await;
                 {
-                    Ok((reranker_back, rerank_res)) => {
-                        guard.reranker = Some(reranker_back);
-                        match rerank_res {
-                            Ok(reranked) => (reranked, true),
-                            Err(_) => (rerank_input, false),
-                        }
+                    let mut guard = self.state.models.lock().await;
+                    if let Some(r) = reranker_back {
+                        guard.reranker = Some(r);
                     }
-                    Err(_) => (rerank_input, false),
                 }
+                (results, used)
             } else {
                 (rerank_input, false)
             }
         };
 
-        let used_hybrid = !fts_results.is_empty();
-
-        let mut scored: Vec<SearchResultItem> = if used_reranker {
-            final_results
+        let min_score = min_score.unwrap_or(0.0);
+        let mut scored: Vec<SearchResultItem> =
+            indexer::pipeline::score_results(final_results, used_reranker, used_hybrid, top_k)
                 .into_iter()
-                .map(|(path, snippet, raw_score)| {
-                    let sigmoid = 1.0 / (1.0 + (-raw_score).exp());
-                    SearchResultItem {
-                        path,
-                        snippet,
-                        score: sigmoid * 100.0,
-                    }
-                })
-                .collect()
-        } else if used_hybrid {
-            let max_rrf = final_results.first().map(|(_, _, s)| *s).unwrap_or(1.0);
-            final_results
-                .into_iter()
-                .map(|(path, snippet, rrf_score)| {
-                    let pct = if max_rrf > 0.0 {
-                        (rrf_score / max_rrf) * 100.0
-                    } else {
-                        0.0
-                    };
-                    SearchResultItem {
-                        path,
-                        snippet,
-                        score: pct,
-                    }
-                })
-                .collect()
-        } else {
-            final_results
-                .into_iter()
-                .map(|(path, snippet, cosine_dist)| {
-                    let similarity = (1.0 - cosine_dist).clamp(0.0, 1.0);
-                    SearchResultItem {
-                        path,
-                        snippet,
-                        score: similarity * 100.0,
-                    }
-                })
-                .collect()
-        };
-
-        scored.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        if used_reranker {
-            scored.retain(|r| r.score >= 25.0);
-        }
-        scored.truncate(top_k);
+                .filter(|r| r.score >= min_score)
+                .map(|r| SearchResultItem { path: r.path, snippet: r.snippet, score: r.score })
+                .collect();
 
         for item in &mut scored {
             if item.snippet.len() > context_bytes {
-                item.snippet = item.snippet[..context_bytes].to_string();
+                let safe_len = item.snippet.floor_char_boundary(context_bytes);
+                item.snippet.truncate(safe_len);
             }
         }
 

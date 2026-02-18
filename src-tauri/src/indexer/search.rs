@@ -59,7 +59,7 @@ pub async fn search_files(
 ) -> Result<Vec<(String, String, f32)>> {
     let table = match db.open_table(table_name).execute().await {
         Ok(t) => t,
-        Err(_) => return Ok(vec![]),
+        Err(_) => return Err(anyhow!("No index found for '{}'. Index some folders first.", table_name)),
     };
 
     let schema = table.schema().await?;
@@ -179,7 +179,7 @@ pub async fn search_fts(
 ) -> Result<Vec<(String, String)>> {
     let table = match db.open_table(table_name).execute().await {
         Ok(t) => t,
-        Err(_) => return Ok(vec![]),
+        Err(_) => return Err(anyhow!("No index found for '{}'. Index some folders first.", table_name)),
     };
 
     let fts_query = FullTextSearchQuery::new(query.to_string());
@@ -277,6 +277,56 @@ pub fn hybrid_merge(
     merged.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
     merged.truncate(limit);
     merged
+}
+
+pub async fn search_pipeline(
+    db: &Connection,
+    table_name: &str,
+    query: &str,
+    query_vector: &[f32],
+    search_limit: usize,
+    path_prefix: Option<&str>,
+    file_extensions: Option<&[String]>,
+) -> Result<(Vec<(String, String, f32)>, bool)> {
+    let query_variants = super::chunking::expand_query(query);
+
+    let vector_fut = search_files(db, table_name, query_vector, search_limit, path_prefix, file_extensions, false);
+
+    let fts_db = db.clone();
+    let fts_table = table_name.to_string();
+    let fe_clone: Option<Vec<String>> = file_extensions.map(|s| s.to_vec());
+    let pp_clone: Option<String> = path_prefix.map(|s| s.to_string());
+    let fts_fut = async move {
+        let pp_ref = pp_clone.as_deref();
+        let fe_ref = fe_clone.as_deref();
+        let futs: Vec<_> = query_variants
+            .iter()
+            .map(|v| search_fts(&fts_db, &fts_table, v, 30, pp_ref, fe_ref, false))
+            .collect();
+        let results = futures::future::join_all(futs).await;
+        let mut all: Vec<(String, String)> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for result in results.into_iter().flatten() {
+            for item in result {
+                if seen.insert(item.0.clone()) {
+                    all.push(item);
+                }
+            }
+        }
+        all
+    };
+
+    let (vector_result, fts_results) = tokio::join!(vector_fut, fts_fut);
+    let vector_results = vector_result?;
+
+    let used_hybrid = !fts_results.is_empty();
+    let merged = if fts_results.is_empty() {
+        vector_results
+    } else {
+        hybrid_merge(&vector_results, &fts_results, search_limit)
+    };
+
+    Ok((merged, used_hybrid))
 }
 
 #[cfg(test)]

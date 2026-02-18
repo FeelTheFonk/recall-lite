@@ -85,6 +85,7 @@ fn main() {
     let model_state = Arc::new(Mutex::new(ModelState {
         model: None,
         init_error: None,
+        cached_dim: None,
     }));
     let reranker_state = Arc::new(Mutex::new(RerankerState {
         reranker: None,
