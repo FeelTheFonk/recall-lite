@@ -11,3 +11,8 @@ target/
 .DS_Store
 *.suo
 *.sw?
+
+# Debug artifacts
+debug_stderr.txt
+debug_stdout.txt
+build_err.txt

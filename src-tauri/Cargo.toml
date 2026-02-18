@@ -20,6 +20,7 @@ winres = "0.1"
 [dependencies]
 # UI - pure Rust native
 eframe = { version = "0.33", default-features = false, features = ["wgpu", "default_fonts"] }
+wgpu = { version = "27", features = ["dx12", "vulkan"] }
 window-vibrancy = "0.7.1"
 global-hotkey = "0.7"
 tray-icon = "0.21"
