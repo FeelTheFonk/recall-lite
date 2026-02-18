@@ -13,11 +13,7 @@ pub fn get_chunk_config(ext: &str) -> ChunkConfig {
         | "fs" | "fsi" | "fsx" | "vb" | "vbs" | "rb" | "erb" | "swift" | "m" | "mm" | "dart"
         | "php" | "pl" | "pm" | "lua" | "r" | "jl" | "ex" | "exs" | "erl" | "hrl" | "hs"
         | "lhs" | "ml" | "mli" | "elm" | "zig" | "nim" | "v" | "d" | "sol" | "move" | "pas"
-        | "lisp" | "el" | "rkt" | "asm" | "s" | "wat" => ChunkConfig {
-            max_bytes: 1200,
-            overlap_bytes: 200,
-        },
-        "vue" | "svelte" | "astro" => ChunkConfig {
+        | "lisp" | "el" | "rkt" | "asm" | "s" | "wat" | "vue" | "svelte" | "astro" => ChunkConfig {
             max_bytes: 1200,
             overlap_bytes: 200,
         },
@@ -384,5 +380,29 @@ mod tests {
     fn test_expand_query_turkish() {
         let variants = expand_query("bu dosya için arama");
         assert!(variants.iter().any(|v| v == "dosya arama"));
+    }
+
+    #[test]
+    fn test_override_chunk_size_zero_clamps_to_100() {
+        let text = "a".repeat(500);
+        let chunks = semantic_chunk_with_overrides(&text, "xyz", Some(0), None);
+        assert!(chunks.iter().all(|c| c.len() <= 100));
+        assert!(chunks.len() > 1);
+    }
+
+    #[test]
+    fn test_override_none_uses_defaults() {
+        let text = "some text";
+        let default_chunks = semantic_chunk(text, "rs");
+        let override_chunks = semantic_chunk_with_overrides(text, "rs", None, None);
+        assert_eq!(default_chunks, override_chunks);
+    }
+
+    #[test]
+    fn test_override_custom_values() {
+        let text = "a".repeat(1000);
+        let chunks = semantic_chunk_with_overrides(&text, "xyz", Some(200), Some(50));
+        assert!(chunks.iter().all(|c| c.len() <= 200));
+        assert!(chunks.len() > 1);
     }
 }
